@@ -2,50 +2,202 @@ using System;
 using UnityEngine;
 using UnityEngine.InputSystem;
 using System.Collections;
+using Unity.VisualScripting;
 
+[RequireComponent(typeof(Rigidbody))]
 public class PlayerController : MonoBehaviour
 {
-    private InputSystem_Actions inputSystem;
+    [Header("Movement")]
+    public float walkForce = 20f;
+    public float drag = 5f;
     
+    [Header("Rotation")]
+    public float rotationSpeed = 10f;
+    
+    
+    [Header("Jump")]
+    public float jumpForce = 7f;
+    public float coyoteTime = 0.5f;
+    public float jumpBufferTime = 0.2f;
+
+    [Header("Dash")]
+    public float dashDuration = .5f;
+    public float dashDistance = 5f;
+    public float dashHeight = 2f;
+    
+    [Header("Climb")]
+    public float climbSpeed = 5f;
+    
+    private Rigidbody rb;
     private Vector2 moveInput;
-    private bool dashInput;
-    private bool jumpInput;
+    private bool isGrounded, isTouchingWall, isClimbing, isDashing;
+    
+    public float coyoteTimer;
+    public float jumpBufferTimer;
+
     private void Awake()
     {
-        inputSystem = new InputSystem_Actions();
-    }
-
-    void Start()
-    {
-        Debug.Log("Si va jalando");
+        rb = GetComponent<Rigidbody>();
+        rb.freezeRotation = true;
     }
 
     private void OnEnable()
     {
-        inputSystem.Enable();
-        inputSystem.Player.Move.performed += ctx => moveInput = ctx.ReadValue<Vector2>();
-        inputSystem.Player.Move.canceled += ctx => moveInput = Vector2.zero;
+        //Movement
+        InputHandler.OnMove += HandleMove;
+        InputHandler.OnJump += HandleJumpInput;
+        InputHandler.OnDash += HandleDashInput;
         
-        inputSystem.Player.Jump.performed += ctx => jumpInput = true;
-        inputSystem.Player.Jump.canceled += ctx => jumpInput = false;
+        //Ground and Wall Check
+        GroundChecker.OnGroundEnter += OnGroundEnter;
+        GroundChecker.OnGroundExit += OnGroundExit;
+        WallChecker.OnWallEnter += OnWallEnter;
+        WallChecker.OnWallExit += OnWallExit;
     }
 
     private void OnDisable()
     {
-       inputSystem.Disable();
+        //Movement
+        InputHandler.OnMove -= HandleMove;
+        InputHandler.OnJump -= HandleJumpInput;
+        InputHandler.OnDash -= HandleDashInput;
+        
+        //Ground and Wall Check
+        GroundChecker.OnGroundEnter -= OnGroundEnter;
+        GroundChecker.OnGroundExit -= OnGroundExit;
+        WallChecker.OnWallEnter -= OnWallEnter;
+        WallChecker.OnWallExit -= OnWallExit;
     }
 
-
-    void Update()
+    private void FixedUpdate()
     {
-        if (moveInput != Vector2.zero)
+        if (!isGrounded)
+            coyoteTimer -= Time.fixedDeltaTime;
+        jumpBufferTimer -= Time.fixedDeltaTime;
+        
+        if(isDashing) return;
+
+        if (isClimbing)
         {
-            Debug.Log("Si va jalando");
+            rb.useGravity = false;
+            Vector3 climbVelocity = Vector3.up * (moveInput.y * climbSpeed);
+            rb.linearVelocity = new Vector3(0f, climbVelocity.y, 0f);
+            return;
+        }
+        else
+        {
+            rb.useGravity = true;
+        }
+        
+        Vector3 desiredDir = new Vector3(moveInput.x, 0f, moveInput.y);
+
+        if (desiredDir.sqrMagnitude > 0.01f)
+        {
+            // --- Rotación suave hacia desiredDir ---
+            Quaternion targetRot = Quaternion.LookRotation(desiredDir);
+            transform.rotation = Quaternion.Slerp(
+                transform.rotation,
+                targetRot,
+                rotationSpeed * Time.fixedDeltaTime
+            );
+
+            // --- Aplicar fuerza en esa dirección ---
+            rb.AddForce(
+                desiredDir.normalized * walkForce,
+                ForceMode.Acceleration
+            );
         }
 
-        if (jumpInput)
+        // Drag horizontal (igual que antes)
+        Vector3 horizVel = new Vector3(rb.linearVelocity.x, 0f, rb.linearVelocity.z);
+        rb.AddForce(-horizVel * drag * Time.fixedDeltaTime, ForceMode.VelocityChange);
+
+        if (jumpBufferTimer > 0 && (isGrounded || coyoteTimer > 0))
         {
-            Debug.Log("Salto");
+            PerformJump();
+            jumpBufferTimer = 0f;
         }
+    }
+
+    private void HandleMove(Vector2 input)
+    {
+        moveInput = input;
+        //Debug.Log($"[MovementController] HandleMove → {moveInput}");
+    }
+
+    private void HandleJumpInput()
+    {
+        jumpBufferTimer = jumpBufferTime;
+    }
+
+    private void HandleDashInput()
+    {
+        if (!isDashing && !isClimbing)
+        {
+            StartCoroutine(PerformDash());
+        }
+    }
+
+    private void OnGroundEnter()
+    {
+        isGrounded = true;
+        if (jumpBufferTimer > 0f)
+        {
+            PerformJump();
+            jumpBufferTimer = 0f;
+        }
+    }
+
+    private void OnGroundExit()
+    {
+        isGrounded = false;
+        coyoteTimer = coyoteTime;
+    }
+
+    private void OnWallEnter()
+    {
+        isTouchingWall = true;
+        isClimbing = true;
+    }
+
+    private void OnWallExit()
+    {
+        isTouchingWall = false;
+        isClimbing = false;
+    }
+
+    private void PerformJump()
+    {
+        rb.useGravity = true;            
+        rb.linearVelocity = new Vector3(
+            rb.linearVelocity.x,
+            jumpForce,
+            rb.linearVelocity.z
+        );
+        isGrounded   = false;
+        coyoteTimer  = 0f;   
+    }
+
+    private IEnumerator PerformDash()
+    {
+        isDashing = true;
+        float elapsedTime = 0;
+        Vector3 startPos = transform.position;
+        Vector3 direction = transform.forward;
+
+        while (elapsedTime < dashDuration)
+        {
+            elapsedTime += Time.deltaTime;
+            float t = elapsedTime / dashDuration;
+            
+            float height = 4f * dashHeight * t * (1 - t);
+            Vector3 targetPos = startPos + direction * dashDistance * t + Vector3.up * height;
+            
+            rb.MovePosition(targetPos);
+            
+            yield return null;
+        }
+        
+        isDashing = false;
     }
 }
